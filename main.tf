@@ -1,118 +1,163 @@
+# provider.tf
 provider "aws" {
-  region     = "us-east-2" # Change this to your desired AWS region
-  access_key = "#"
-  secret_key = "#"
+  region = "us-west-2"
 }
 
-# Creating everything in Default VPC, I can also create VPC and them create ec2 in that VPC.
-
-resource "aws_instance" "ec2_instance" {
-  ami           = "ami-05fb0b8c1424f266b"        # AMI of EC2 Instance
-  instance_type = "t2.micro" #Instance Type
-  key_name      = "" # Replace with your key pair name
-  iam_instance_profile = aws_iam_instance_profile.ec2_instance_profile.name
+# ec2.tf
+resource "aws_instance" "app" {
+  ami           = "ami-0c55b159cbfafe1f0"  # Update with your preferred AMI
+  instance_type = "t2.micro"
 
   tags = {
-    Name = "EC2-Instance-Assignment" #Tags for EC2 Instance
+    Name = "AppInstance"
   }
 }
 
-# Standard Queue
-resource "aws_sqs_queue" "sqs_queue_standard" {
-  name = "my-sqs-queue-standard"
+# sqs.tf
+resource "aws_sqs_queue" "app_queue" {
+  name = "app-queue"
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.dead_letter_queue.arn
+    maxReceiveCount     = 5
+  })
 }
 
-# FIFO Queue Uncomment to create FIFO QUEUE
-# resource "aws_sqs_queue" "sqs_queue_fifo" {
-#   name = "my-sqs-queue.fifo"
-#   fifo_queue = true
-# }
+resource "aws_sqs_queue" "dead_letter_queue" {
+  name = "app-dead-letter-queue"
+}
 
-# Dynamo DB table
-resource "aws_dynamodb_table" "dynamodb_assignment" {
-  name         = "dynamodb-assignment"
+resource "aws_iam_role" "sqs_role" {
+  name = "sqs-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_policy" "sqs_policy" {
+  name        = "sqs-policy"
+  description = "Policy for SQS access"
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "sqs:SendMessage",
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes",
+        ]
+        Effect   = "Allow"
+        Resource = [
+          aws_sqs_queue.app_queue.arn,
+          aws_sqs_queue.dead_letter_queue.arn,
+        ]
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "sqs_policy_attachment" {
+  role       = aws_iam_role.sqs_role.name
+  policy_arn = aws_iam_policy.sqs_policy.arn
+}
+
+# dynamodb.tf
+resource "aws_dynamodb_table" "app_table" {
+  name         = "app-table"
   billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "id"
+  
   attribute {
     name = "id"
     type = "S"
   }
+
+  hash_key = "id"
+  
+  tags = {
+    Name = "AppTable"
+  }
 }
 
-# IAM Instance Profile to attatch with EC2 Instance
-resource "aws_iam_instance_profile" "ec2_instance_profile" {
-  name = "EC2_Instance_Profile"
-
-  role = aws_iam_role.ec2_role.name
-}
-
-
-# IAM Role for EC2 instance
-resource "aws_iam_role" "ec2_role" {
-  name = "ec2_role_for_sqs_and_dynamoDB"
+resource "aws_iam_role" "dynamodb_role" {
+  name = "dynamodb-role"
 
   assume_role_policy = jsonencode({
-    Version = "2012-10-17",
+    Version = "2012-10-17"
     Statement = [
       {
-        Action = "sts:AssumeRole",
-        Effect = "Allow",
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
         Principal = {
-          Service = "ec2.amazonaws.com",
-        },
+          Service = "ec2.amazonaws.com"
+        }
       },
-    ],
+    ]
   })
 }
 
-# IAM SQS Policy 
-data "aws_iam_policy_document" "sqs_queue_policy_json" {
-  statement {
-    effect    = "Allow"
-    actions   = ["sqs:SendMessage", "sqs:ReceiveMessage"]
-    resources = ["${aws_sqs_queue.sqs_queue_standard.arn}"]
-  }
+resource "aws_iam_policy" "dynamodb_policy" {
+  name        = "dynamodb-policy"
+  description = "Policy for DynamoDB access"
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:Scan",
+          "dynamodb:Query",
+          "dynamodb:UpdateItem",
+        ]
+        Effect   = "Allow"
+        Resource = aws_dynamodb_table.app_table.arn
+      },
+    ]
+  })
 }
 
-# Create a policy with above json policy
-resource "aws_iam_policy" "sqs-queue-policy" {
-  name        = "SQS-Queue-Policy"
-  description = "SQS Queue Policy to send and receive messages"
-  policy      = data.aws_iam_policy_document.sqs_queue_policy_json.json
-}
-
-# Assign this SQS policy to IAM Role
-resource "aws_iam_role_policy_attachment" "sqs_policy_attachment" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = aws_iam_policy.sqs-queue-policy.arn
-}
-
-
-# IAM DynamoDB Policy for all tables in DB
-data "aws_iam_policy_document" "dynami_db_json" {
-  statement {
-    effect    = "Allow"
-    actions   = ["dynamodb:CreateTable",
-                "dynamodb:PutItem",
-                "dynamodb:DescribeTable",
-                "dynamodb:GetItem",
-                "dynamodb:Query",
-                "dynamodb:UpdateItem",
-                "dynamodb:DeleteTable",
-                "dynamodb:UpdateTable"]
-    resources = ["${aws_dynamodb_table.dynamodb_assignment.arn}"]    # Edit this to mention specific table in Dynamo DB
-  }
-}
-
-# Create a policy with above json policy
-resource "aws_iam_policy" "dynamo-db-policy" {
-  name        = "Dynamo-DB-Policy"
-  description = "Policy for DynamoDB tables to be created along with permissions to read and write table data"
-  policy      = data.aws_iam_policy_document.dynami_db_json.json
-}
-
-# Assign this DynamoDB policy to IAM Role
 resource "aws_iam_role_policy_attachment" "dynamodb_policy_attachment" {
-  role       = aws_iam_role.ec2_role.name
-  policy_arn = aws_iam_policy.dynamo-db-policy.arn
+  role       = aws_iam_role.dynamodb_role.name
+  policy_arn = aws_iam_policy.dynamodb_policy.arn
 }
+
+# ec2_iam_role.tf
+resource "aws_iam_instance_profile" "app_instance_profile" {
+  name = "app-instance-profile"
+  role = aws_iam_role.sqs_role.name
+}
+
+resource "aws_iam_instance_profile" "dynamodb_instance_profile" {
+  name = "dynamodb-instance-profile"
+  role = aws_iam_role.dynamodb_role.name
+}
+
+resource "aws_instance" "app" {
+  ami                    = "ami-0c55b159cbfafe1f0"  # Update with your preferred AMI
+  instance_type          = "t2.micro"
+  iam_instance_profile   = aws_iam_instance_profile.app_instance_profile.name
+
+  tags = {
+    Name = "AppInstance"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.sqs_policy_attachment,
+    aws_iam_role_policy_attachment.dynamodb_policy_attachment
+  ]
+}
+
+
